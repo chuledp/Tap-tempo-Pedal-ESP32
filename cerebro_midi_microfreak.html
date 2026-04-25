@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cerebro MIDI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0a;
+  --panel:#111111;
+  --card:#161616;
+  --row:#0d0d0d;
+  --amber:#f0a500;
+  --amber-dim:#7a5200;
+  --amber-glow:rgba(240,165,0,0.12);
+  --green:#00d97e;
+  --red:#ff4d4d;
+  --border:#252525;
+  --border2:#2e2e2e;
+  --text:#c8c8c8;
+  --text-dim:#5a5a5a;
+  --text-muted:#3a3a3a;
+  --mono:'Share Tech Mono',monospace;
+  --cond:'Barlow Condensed',sans-serif;
+}
+html{background:var(--bg)}
+body{
+  font-family:var(--cond);
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  padding:0;
+}
+
+/* SCANLINES overlay */
+body::before{
+  content:'';
+  position:fixed;
+  inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.15) 2px,rgba(0,0,0,0.15) 4px);
+  pointer-events:none;
+  z-index:1000;
+  opacity:0.4;
+}
+
+/* HEADER */
+.header{
+  border-bottom:1px solid var(--border2);
+  padding:16px 28px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:var(--panel);
+  position:relative;
+}
+.header::after{
+  content:'';
+  position:absolute;
+  bottom:-3px;left:0;right:0;
+  height:2px;
+  background:linear-gradient(90deg,transparent,var(--amber),transparent);
+  opacity:0.4;
+}
+.logo-block{display:flex;align-items:baseline;gap:10px}
+.logo-main{
+  font-family:var(--cond);
+  font-weight:700;
+  font-size:22px;
+  letter-spacing:6px;
+  color:#fff;
+  text-transform:uppercase;
+}
+.logo-sub{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--amber);
+  letter-spacing:2px;
+  opacity:0.8;
+}
+.led{
+  width:8px;height:8px;
+  border-radius:50%;
+  background:var(--amber);
+  box-shadow:0 0 6px var(--amber),0 0 12px rgba(240,165,0,0.4);
+  animation:blink 2.4s ease-in-out infinite;
+}
+@keyframes blink{0%,90%,100%{opacity:1}93%{opacity:0.2}}
+
+/* TRANSPORT BAR */
+.transport{
+  background:var(--panel);
+  border-bottom:1px solid var(--border);
+  padding:14px 28px;
+  display:flex;
+  align-items:center;
+  gap:32px;
+  flex-wrap:wrap;
+}
+.ctrl-group{display:flex;flex-direction:column;gap:5px}
+.ctrl-label{
+  font-family:var(--mono);
+  font-size:9px;
+  color:var(--amber);
+  letter-spacing:2px;
+  text-transform:uppercase;
+}
+.ctrl-label-dim{
+  font-family:var(--mono);
+  font-size:9px;
+  color:var(--text-dim);
+  letter-spacing:2px;
+}
+select,input[type="number"]{
+  background:var(--row);
+  color:var(--text);
+  border:1px solid var(--border2);
+  border-radius:3px;
+  padding:7px 10px;
+  font-family:var(--mono);
+  font-size:13px;
+  appearance:none;
+  -webkit-appearance:none;
+  outline:none;
+  cursor:pointer;
+  transition:border-color 0.15s;
+}
+select:focus,input[type="number"]:focus{border-color:var(--amber)}
+select:hover,input[type="number"]:hover{border-color:var(--border2);background:#131313}
+
+.preset-badge{
+  background:var(--row);
+  border:1px solid var(--amber-dim);
+  border-radius:3px;
+  padding:7px 16px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+}
+.preset-label{
+  font-family:var(--mono);
+  font-size:9px;
+  color:var(--amber);
+  letter-spacing:2px;
+}
+.preset-number{
+  font-family:var(--mono);
+  font-size:20px;
+  font-weight:bold;
+  color:#fff;
+  letter-spacing:2px;
+}
+.separator{
+  width:1px;
+  height:40px;
+  background:var(--border2);
+  flex-shrink:0;
+}
+
+/* MAIN GRID */
+.macros-grid{
+  display:grid;
+  grid-template-columns:repeat(2,1fr);
+  gap:1px;
+  background:var(--border);
+  padding:1px;
+  margin:24px;
+  border:1px solid var(--border);
+  border-radius:4px;
+  overflow:hidden;
+}
+@media(max-width:700px){.macros-grid{grid-template-columns:1fr}}
+
+/* MACRO CARD */
+.macro-card{
+  background:var(--card);
+  padding:0;
+  position:relative;
+}
+.macro-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:12px 16px;
+  border-bottom:1px solid var(--border);
+  background:var(--panel);
+}
+.macro-number{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-dim);
+  letter-spacing:2px;
+}
+.macro-id{
+  font-family:var(--cond);
+  font-weight:700;
+  font-size:11px;
+  letter-spacing:3px;
+  color:var(--amber);
+  text-transform:uppercase;
+}
+input.name-input{
+  background:transparent;
+  border:none;
+  border-bottom:1px solid var(--border2);
+  border-radius:0;
+  color:#fff;
+  font-family:var(--mono);
+  font-size:13px;
+  letter-spacing:3px;
+  text-transform:uppercase;
+  text-align:right;
+  width:90px;
+  padding:2px 4px;
+  outline:none;
+  transition:border-color 0.15s;
+}
+input.name-input:focus{border-bottom-color:var(--amber)}
+input.name-input::placeholder{color:var(--text-muted)}
+
+/* DEST ROWS */
+.dest-table{padding:8px 0 12px}
+.dest-row{
+  display:grid;
+  grid-template-columns:18px 1fr auto auto auto;
+  align-items:center;
+  gap:8px;
+  padding:6px 16px;
+  border-bottom:1px solid var(--border);
+  transition:background 0.1s;
+}
+.dest-row:last-child{border-bottom:none}
+.dest-row:hover{background:rgba(240,165,0,0.03)}
+
+.dest-index{
+  font-family:var(--mono);
+  font-size:9px;
+  color:var(--text-muted);
+  text-align:center;
+}
+select.cc-select{
+  font-size:11px;
+  padding:5px 8px;
+  width:100%;
+  min-width:0;
+}
+select.pol-select{
+  font-size:12px;
+  padding:5px 6px;
+  width:48px;
+  text-align:center;
+  font-weight:bold;
+}
+.range-group{
+  display:flex;
+  align-items:center;
+  gap:4px;
+}
+.range-label{
+  font-family:var(--mono);
+  font-size:8px;
+  color:var(--text-dim);
+  width:14px;
+  text-align:right;
+}
+input[type="number"].range-val{
+  width:44px;
+  padding:5px 4px;
+  text-align:center;
+  font-size:12px;
+}
+
+/* FOOTER */
+.footer{
+  padding:20px 24px 32px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:12px;
+}
+.status-line{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text-dim);
+  letter-spacing:1px;
+}
+.status-ok{color:var(--green)}
+
+.save-btn{
+  background:var(--amber);
+  color:#000;
+  border:none;
+  padding:13px 36px;
+  font-family:var(--cond);
+  font-size:14px;
+  font-weight:700;
+  letter-spacing:4px;
+  text-transform:uppercase;
+  border-radius:3px;
+  cursor:pointer;
+  transition:all 0.15s;
+  position:relative;
+  overflow:hidden;
+}
+.save-btn::before{
+  content:'';
+  position:absolute;
+  inset:0;
+  background:rgba(255,255,255,0);
+  transition:background 0.15s;
+}
+.save-btn:hover{background:#ffb700;transform:translateY(-1px)}
+.save-btn:active{transform:translateY(1px);background:#d09000}
+.save-btn.pulse{animation:savepulse 0.4s ease}
+@keyframes savepulse{0%{box-shadow:0 0 0 0 rgba(240,165,0,0.6)}100%{box-shadow:0 0 0 18px transparent}}
+
+/* TOAST */
+.toast{
+  position:fixed;
+  bottom:28px;right:28px;
+  background:#1a1a1a;
+  border:1px solid var(--amber);
+  border-radius:4px;
+  padding:12px 20px;
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--amber);
+  letter-spacing:1px;
+  transform:translateY(80px);
+  opacity:0;
+  transition:all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+  z-index:2000;
+}
+.toast.show{transform:translateY(0);opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo-block">
+    <span class="logo-main">Cerebro MIDI</span>
+    <span class="logo-sub">v2.0 — MicroFreak</span>
+  </div>
+  <div class="led" id="led"></div>
+</div>
+
+<div class="transport">
+  <div class="ctrl-group">
+    <span class="ctrl-label">Banco MSB</span>
+    <select id="bankSelect" onchange="updateAbsolute()">
+      <option value="0">Banco 0</option>
+      <option value="1">Banco 1</option>
+      <option value="2">Banco 2</option>
+      <option value="3" selected>Banco 3</option>
+      <option value="4">Banco 4</option>
+    </select>
+  </div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Programa PC</span>
+    <input type="number" id="programSelect" min="1" max="128" value="16" onchange="updateAbsolute()" style="width:70px">
+  </div>
+  <div class="separator"></div>
+  <div class="preset-badge">
+    <span class="preset-label">Preset abs.</span>
+    <span class="preset-number" id="absoluteDisplay">400</span>
+  </div>
+  <div style="margin-left:auto">
+    <span class="ctrl-label-dim" style="font-size:10px">4 MACROS · 3 DESTINOS CADA UNA · USB DMX PRO</span>
+  </div>
+</div>
+
+<div class="macros-grid" id="macrosContainer"></div>
+
+<div class="footer">
+  <span class="status-line">SYS — <span class="status-ok" id="statusTxt">LISTO</span></span>
+  <button class="save-btn" id="saveBtn" onclick="saveToESP32()">Guardar en ESP32</button>
+</div>
+
+<div class="toast" id="toast">✓ PRESET GUARDADO</div>
+
+<script>
+const ccOptions=[
+  {val:"null",label:"— Ninguno —"},
+  {val:"1",label:"CC 1 · Mod Wheel (Matrix)"},
+  {val:"2",label:"CC 2 · Spice"},
+  {val:"5",label:"CC 5 · Glide"},
+  {val:"9",label:"CC 9 · Osc Type"},
+  {val:"10",label:"CC 10 · Osc Wave"},
+  {val:"11",label:"CC 11 · Expr. (Matrix)"},
+  {val:"12",label:"CC 12 · Osc Timbre"},
+  {val:"13",label:"CC 13 · Osc Shape"},
+  {val:"23",label:"CC 23 · Filter Cutoff"},
+  {val:"24",label:"CC 24 · Cycl Env Amt"},
+  {val:"26",label:"CC 26 · Filter Amount"},
+  {val:"28",label:"CC 28 · Cycl Env Hold"},
+  {val:"29",label:"CC 29 · Env Sustain"},
+  {val:"64",label:"CC 64 · Key Hold"},
+  {val:"83",label:"CC 83 · Resonance"},
+  {val:"91",label:"CC 91 · Arp/Seq Rt (F)"},
+  {val:"92",label:"CC 92 · Arp/Seq Rt (S)"},
+  {val:"93",label:"CC 93 · LFO Rate (F)"},
+  {val:"94",label:"CC 94 · LFO Rate (S)"},
+  {val:"102",label:"CC 102 · Cycl Env Rise"},
+  {val:"103",label:"CC 103 · Cycl Env Fall"},
+  {val:"105",label:"CC 105 · Env Attack"},
+  {val:"106",label:"CC 106 · Env Decay"}
+];
+
+function updateAbsolute(){
+  const bank=parseInt(document.getElementById('bankSelect').value);
+  let prog=parseInt(document.getElementById('programSelect').value)||1;
+  if(prog<1)prog=1;if(prog>128)prog=128;
+  document.getElementById('programSelect').value=prog;
+  document.getElementById('absoluteDisplay').innerText=(bank*128)+prog;
+}
+
+function renderMacros(){
+  const container=document.getElementById('macrosContainer');
+  let opts='';
+  ccOptions.forEach(o=>{opts+=`<option value="${o.val}">${o.label}</option>`});
+  let html='';
+  for(let m=1;m<=4;m++){
+    html+=`
+    <div class="macro-card" id="macro_${m}">
+      <div class="macro-header">
+        <div>
+          <div class="macro-number">MACRO ${m.toString().padStart(2,'0')}</div>
+        </div>
+        <input type="text" id="m${m}_name" class="name-input" maxlength="6" placeholder="NOMBRE">
+      </div>
+      <div class="dest-table">`;
+    for(let d=1;d<=3;d++){
+      html+=`
+      <div class="dest-row">
+        <span class="dest-index">${d}</span>
+        <select id="m${m}_d${d}_cc" class="cc-select">${opts}</select>
+        <select id="m${m}_d${d}_pol" class="pol-select">
+          <option value="1" style="color:#55ff88">[ + ]</option>
+          <option value="-1" style="color:#ff5555">[ − ]</option>
+        </select>
+        <div class="range-group">
+          <span class="range-label">mn</span>
+          <input type="number" id="m${m}_d${d}_min" class="range-val" min="0" max="127" value="0">
+        </div>
+        <div class="range-group">
+          <span class="range-label">mx</span>
+          <input type="number" id="m${m}_d${d}_max" class="range-val" min="0" max="127" value="127">
+        </div>
+      </div>`;
+    }
+    html+=`</div></div>`;
+  }
+  container.innerHTML=html;
+}
+
+function saveToESP32(){
+  const payload={
+    bank_lsb:parseInt(document.getElementById('bankSelect').value),
+    program_change:parseInt(document.getElementById('programSelect').value)-1,
+    absolute_preset:parseInt(document.getElementById('absoluteDisplay').innerText),
+    macros:{}
+  };
+  for(let m=1;m<=4;m++){
+    let macroData={
+      name:document.getElementById(`m${m}_name`).value.toUpperCase().padEnd(6,' '),
+      destinations:[]
+    };
+    for(let d=1;d<=3;d++){
+      let ccVal=document.getElementById(`m${m}_d${d}_cc`).value;
+      macroData.destinations.push({
+        cc:ccVal==="null"?null:parseInt(ccVal),
+        polarity:parseInt(document.getElementById(`m${m}_d${d}_pol`).value),
+        min:parseInt(document.getElementById(`m${m}_d${d}_min`).value),
+        max:parseInt(document.getElementById(`m${m}_d${d}_max`).value)
+      });
+    }
+    payload.macros[`macro_${m}`]=macroData;
+  }
+  console.log("Payload ESP32:",JSON.stringify(payload,null,2));
+
+  const btn=document.getElementById('saveBtn');
+  btn.classList.add('pulse');
+  setTimeout(()=>btn.classList.remove('pulse'),400);
+
+  document.getElementById('statusTxt').textContent='ENVIANDO...';
+  document.getElementById('statusTxt').style.color='var(--amber)';
+
+  setTimeout(()=>{
+    document.getElementById('statusTxt').textContent='OK · PRESET '+document.getElementById('absoluteDisplay').innerText;
+    document.getElementById('statusTxt').style.color='var(--green)';
+    const t=document.getElementById('toast');
+    t.classList.add('show');
+    setTimeout(()=>t.classList.remove('show'),2200);
+  },600);
+}
+
+renderMacros();
+updateAbsolute();
+</script>
+</body>
+</html>
