@@ -1,126 +1,242 @@
 /*
- * ESP32 MIDI TAP TEMPO - DUAL OUTPUT
- * * Proyecto: Sincronización para Roland SP-404 mkII y Arturia MicroFreak
- * Hardware: ESP32-S3 (DevKitC-1)
- * Autor: Julián Di Pietro
- * Fecha: Diciembre 2025
- * * DESCRIPCIÓN:
- * Controlador de Tap Tempo MIDI con lógica inteligente.
- * - Soporta pedales "Normalmente Cerrados" (NC).
- * - Algoritmo de suavizado adaptativo ("Elastic Tempo").
- * - Doble salida Serial para cubrir Jacks TRS Tipo A y Tipo B.
- * - Feedback visual sincronizado (LED Externo + RGB interno).
- * - Modo "Pánico/Start" mediante presión larga.
- * * DEPENDENCIAS:
- * - Librería Adafruit NeoPixel
+ * CEREBRO MIDI ESP32-S3 - Branch: Web-Macros
+ * V2.0 - Tap Tempo Híbrido + OLED + Web Server + LittleFS
  */
 
 #include <Arduino.h>
 #include <math.h> 
 #include <Adafruit_NeoPixel.h> 
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 
-// --- PINES ---
-// Salidas MIDI (3.3V Logic)
-const int txPin1 = 17;     // Salida Principal
-const int txPin2 = 43;     // Salida Secundaria (Backup/Dual)
-// Entradas y Salidas Físicas
-const int pedalPin = 13;   // Pedal de Sustain (Configurado para NC)
-const int ledPin = 39;     // LED Rojo Externo
+#include "animation.h"
+#include "web_interface.h"
 
-// --- CONFIGURACIÓN RGB (ESP32-S3 Built-in) ---
-const int rgbPin = 48; 
-const int numPixels = 1;
-Adafruit_NeoPixel pixels(numPixels, rgbPin, NEO_GRB + NEO_KHZ800);
+// --- PINES ESP32-S3 ---
+const int txPin = 43;      // MIDI OUT (Puenteado)
+const int pedalPin = 13;   // Tap Tempo / Sustain
+const int ledPin = 39;     // LED Externo
+const int rgbPin = 48;     // NeoPixel
+const int potPins[4] = {4, 5, 6, 7}; // ADC1 (Macros)
 
-// --- PALETA DE COLORES ---
-uint32_t colorTempo = pixels.Color(0, 0, 50);    // Azul Tenue (Reposo)
-uint32_t colorFlash = pixels.Color(50, 50, 255); // Azul Fuerte (Beat)
-uint32_t colorStart = pixels.Color(255, 0, 0);   // Rojo (Modo Start)
+// --- RED Y SERVIDOR ---
+const char* ssid = "Cerebro_MIDI";
+const char* password = "arturia_freak";
+AsyncWebServer server(80);
 
-// --- ESTADOS ---
-bool startMode = false; // false = Tap Tempo, true = Modo Start/Reset
+// --- CONFIGURACIÓN OLED ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// --- VARIABLES DE RELOJ MIDI ---
+// --- CONFIGURACIÓN RGB ---
+Adafruit_NeoPixel pixels(1, rgbPin, NEO_GRB + NEO_KHZ800);
+uint32_t colorTempo  = pixels.Color(0, 0, 50);
+uint32_t colorFlash  = pixels.Color(50, 50, 255);
+uint32_t colorStart  = pixels.Color(255, 0, 0);
+uint32_t colorListen = pixels.Color(180, 0, 255);
+bool startMode = false; 
+
+// --- VARIABLES RELOJ Y PEDAL ---
 float currentBPM = 120.0;
 unsigned long lastClockMicros = 0;
-unsigned long clockIntervalMicros = 20833; // 120 BPM por defecto
+unsigned long clockIntervalMicros = 20833; 
 int clockTickCounter = 0;
 
-// --- VARIABLES DEL PEDAL (LÓGICA NC) ---
 unsigned long pressStartTime = 0;
 bool isPressed = false;
 bool longPressHandled = false;
 unsigned long lastPressTime = 0; 
 unsigned long lastDebounceTime = 0;
-const int debounceDelay = 50; // Filtro anti-rebote (50ms)
+const int debounceDelay = 50; 
 
-// --- VARIABLES DE PROMEDIO (TAP TEMPO) ---
 long tapIntervals[3]; 
 int tapIndex = 0;
-bool newSequence = true; // Indica si empezamos una nueva serie de taps
+bool newSequence = true; 
+int tapsInSequence = 0;  
+long lastValidInterval = 500; 
+const unsigned long TIMEOUT_MS = 2000;
+bool isListeningMode = false;
 
-// ================================================================
-// SETUP
-// ================================================================
+// --- ESTRUCTURAS DE MACROS ---
+struct Destino { int cc; int polarity; int min; int max; };
+struct Macro { char name[7]; Destino dests[3]; };
+
+Macro currentMacros[4];
+int lastRawValue[4] = {-1, -1, -1, -1};
+int lastSentValue[4][3];
+
+// === FUNCIONES AUXILIARES ===
+
+void sendResetSequence() {
+  Serial1.write(0xFC); // STOP
+  delay(5);
+  Serial1.write(0xB0); Serial1.write(123); Serial1.write(0); // ALL NOTES OFF
+  delay(5);
+  Serial1.write(0xFA); // START
+}
+
+void reproducirAnimacionInicio() {
+  int frameDelay = 1000 / 8; // 8 FPS
+  for (int i = 0; i < epd_bitmap_allArray_LEN; i++) {
+    display.clearDisplay();
+    display.drawBitmap(0, 0, epd_bitmap_allArray[i], 128, 64, SSD1306_WHITE);
+    display.display();
+    delay(frameDelay); 
+  }
+  delay(500); 
+  display.clearDisplay();
+  display.display();
+}
+
+void cargarPreset(int absoluteNumber) {
+  String path = "/preset_" + String(absoluteNumber) + ".json";
+  if (!LittleFS.exists(path)) return;
+
+  File file = LittleFS.open(path, "r");
+  StaticJsonDocument<1024> doc;
+  deserializeJson(doc, file);
+  file.close();
+
+  for (int i = 0; i < 4; i++) {
+    String mKey = "macro_" + String(i + 1);
+    strlcpy(currentMacros[i].name, doc["macros"][mKey]["name"] | "MACRO", 7);
+    for (int j = 0; j < 3; j++) {
+      currentMacros[i].dests[j].cc = doc["macros"][mKey]["destinations"][j]["cc"] | -1;
+      currentMacros[i].dests[j].polarity = doc["macros"][mKey]["destinations"][j]["polarity"] | 1;
+      currentMacros[i].dests[j].min = doc["macros"][mKey]["destinations"][j]["min"] | 0;
+      currentMacros[i].dests[j].max = doc["macros"][mKey]["destinations"][j]["max"] | 127;
+    }
+  }
+}
+
+void procesarMacros() {
+  for (int i = 0; i < 4; i++) {
+    int raw = analogRead(potPins[i]);
+    
+    // Filtro de ruido (Hysteresis) para no saturar el bus MIDI
+    if (abs(raw - lastRawValue[i]) < 15) continue; 
+    lastRawValue[i] = raw;
+
+    for (int j = 0; j < 3; j++) {
+      Destino &d = currentMacros[i].dests[j];
+      if (d.cc == -1) continue;
+
+      int midiVal;
+      if (d.polarity == 1) {
+        midiVal = map(raw, 0, 4095, d.min, d.max);
+      } else {
+        midiVal = map(raw, 0, 4095, d.max, d.min);
+      }
+      
+      // Limitar valores al estándar MIDI
+      if (midiVal > 127) midiVal = 127;
+      if (midiVal < 0) midiVal = 0;
+
+      if (midiVal != lastSentValue[i][j]) {
+        Serial1.write(0xB0); 
+        Serial1.write(d.cc);
+        Serial1.write(midiVal);
+        lastSentValue[i][j] = midiVal;
+      }
+    }
+  }
+}
+
+// === SETUP ===
 void setup() {
-  // Inicialización de puertos Seriales para MIDI (Baud 31250)
-  Serial1.begin(31250, SERIAL_8N1, -1, txPin1);
-  Serial2.begin(31250, SERIAL_8N1, -1, txPin2);
+  Serial.begin(115200);
+  Serial1.begin(31250, SERIAL_8N1, -1, txPin);
   
-  // Configuración de Pines
   pinMode(pedalPin, INPUT_PULLUP);
   pinMode(ledPin, OUTPUT);
 
-  // Inicialización LED RGB
   pixels.begin();
   pixels.setBrightness(50);
-  pixels.clear(); 
-  pixels.show();
+  pixels.clear(); pixels.show();
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    pixels.setPixelColor(0, pixels.Color(255, 0, 0)); pixels.show();
+    for(;;); 
+  }
+
+  reproducirAnimacionInicio();
   
-  // Inicializar array de intervalos (Default 120 BPM = 500ms)
+  // File System
+  if (!LittleFS.begin(true)) { Serial.println("Error LittleFS"); }
+
+  // Wi-Fi Access Point
+  WiFi.softAP(ssid, password);
+
+  // Servidor Web
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", "OK");
+  }, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+    StaticJsonDocument<1024> doc;
+    deserializeJson(doc, data);
+    int presetNum = doc["absolute_preset"];
+    String path = "/preset_" + String(presetNum) + ".json";
+    
+    File file = LittleFS.open(path, "w");
+    serializeJson(doc, file);
+    file.close();
+    
+    cargarPreset(presetNum); 
+  });
+
+  server.begin();
+  
   for(int i=0; i<3; i++) tapIntervals[i] = 500; 
-  
-  // Enviar mensaje de START al iniciar
-  Serial1.write(0xFA); Serial2.write(0xFA);
+  sendResetSequence();
+  cargarPreset(1); // Carga default
 }
 
-// ================================================================
-// LOOP PRINCIPAL
-// ================================================================
+// === LOOP (TAP TEMPO Y LECTURA) ===
 void loop() {
   unsigned long nowMicros = micros();
   unsigned long nowMillis = millis();
 
-  // --------------------------------------------------------------
-  // 1. GENERADOR DE RELOJ MIDI
-  // --------------------------------------------------------------
+  // 1. Escanear Potenciómetros y Enviar CC
+  procesarMacros();
+
+  // 2. Lógica Tap Tempo
+  if (tapsInSequence > 0 && (nowMillis - lastPressTime < TIMEOUT_MS)) {
+    isListeningMode = true;
+  } else {
+    isListeningMode = false;
+    if (tapsInSequence > 0) {
+      tapsInSequence = 0;
+      newSequence = true;
+    }
+  }
+
   if (nowMicros - lastClockMicros >= clockIntervalMicros) {
     lastClockMicros += clockIntervalMicros;
+    Serial1.write(0xF8);
     
-    // Enviar Tick MIDI (0xF8) a ambas salidas
-    Serial1.write(0xF8); Serial2.write(0xF8);
-    
-    // --- LÓGICA VISUAL ---
     if (startMode) {
-      // MODO START: LED Fijo Rojo
       digitalWrite(ledPin, HIGH); 
-      pixels.setPixelColor(0, colorStart); 
-      pixels.show();
+      pixels.setPixelColor(0, colorStart); pixels.show();
+    } else if (isListeningMode) {
+       digitalWrite(ledPin, LOW); 
+       pixels.setPixelColor(0, colorListen); pixels.show();
     } else {
-      // MODO TEMPO: Flash sincronizado (Duración corta para precisión)
-      
-      // ENCENDIDO (Tick 0 - Downbeat)
       if (clockTickCounter == 0) { 
         digitalWrite(ledPin, HIGH);        
-        pixels.setPixelColor(0, colorFlash); 
-        pixels.show(); 
+        pixels.setPixelColor(0, colorFlash); pixels.show(); 
       }
-      
-      // APAGADO RÁPIDO (Tick 4) - Corte tipo Staccato
       if (clockTickCounter == 4) { 
         digitalWrite(ledPin, LOW);         
-        pixels.setPixelColor(0, colorTempo); 
-        pixels.show(); 
+        pixels.setPixelColor(0, colorTempo); pixels.show(); 
       }
     }
     
@@ -128,96 +244,73 @@ void loop() {
     if (clockTickCounter >= 24) clockTickCounter = 0;
   }
 
-  // --------------------------------------------------------------
-  // 2. LECTURA DEL PEDAL (Lógica Invertida - Normalmente Cerrado)
-  // --------------------------------------------------------------
   int reading = digitalRead(pedalPin);
-
-  // Filtro de Rebote (Debounce)
   if ( (nowMillis - lastDebounceTime) > debounceDelay ) {
-
-    // --- AL PISAR --- 
-    // Nota: En pedales NC, pisar abre el circuito, resultando en HIGH (INPUT_PULLUP)
     if (reading == HIGH && !isPressed) { 
-      
       lastDebounceTime = nowMillis; 
       isPressed = true;
       pressStartTime = nowMillis;
       longPressHandled = false; 
       
+      if (!startMode) { pixels.setPixelColor(0, colorListen); pixels.show(); }
+
       if (startMode) {
-        // ACCIÓN: START / RESET
-        // Envía 0xFA para reiniciar las secuencias al compás 1
-        Serial1.write(0xFA); Serial2.write(0xFA);
-        
-        // Reseteo visual
+        sendResetSequence();
         clockTickCounter = 0;
         lastClockMicros = nowMicros;
-        pixels.setPixelColor(0, pixels.Color(255, 255, 255)); // Flash Blanco
-        pixels.show(); 
-        delay(50);
-        
+        pixels.setPixelColor(0, pixels.Color(255, 255, 255)); pixels.show(); delay(50);
       } else {
-        // ACCIÓN: TAP TEMPO
         unsigned long tapGap = nowMillis - lastPressTime;
-        
-        // Filtro de rango humano (40 BPM a 240 BPM aprox)
-        if (tapGap > 250 && tapGap < 2000) {
-           
+        if (tapGap > 250 && tapGap < 2500) {
+           float variation = 0;
+           if (lastValidInterval > 0) variation = abs((long)tapGap - lastValidInterval) / (float)lastValidInterval;
+           if (variation > 0.30) newSequence = true; 
+
            if (newSequence) {
-             // Si es el primer tap de una serie, reiniciamos el promedio
              for(int i=0; i<3; i++) tapIntervals[i] = tapGap;
              newSequence = false;
+             tapsInSequence = 1;
+             lastValidInterval = tapGap;
+             clockTickCounter = 0; 
+             lastClockMicros = nowMicros; 
            } else {
-             // Promedio Circular de los últimos 3 taps
+             tapsInSequence++; 
              tapIntervals[tapIndex] = tapGap;
              tapIndex = (tapIndex + 1) % 3; 
-           }
 
-           long avg = (tapIntervals[0] + tapIntervals[1] + tapIntervals[2]) / 3;
-           
-           if (avg > 0) {
-             // Cálculo de BPM (1 Tap = 1 Negra)
-             currentBPM = round(60000.0 / avg); 
-             
-             // Límites de seguridad (Clamping)
-             if (currentBPM < 40) currentBPM = 40;
-             if (currentBPM > 240) currentBPM = 240;
-             
-             // Actualizar intervalo del reloj
-             clockIntervalMicros = (60.0 / currentBPM / 24.0) * 1000000.0;
-             
-             // Alineación Inmediata del Beat ("On The Fly")
-             // Sincroniza el "Uno" con el pisotón
-             clockTickCounter = 0;
-             lastClockMicros = nowMicros; 
+             if (tapsInSequence >= 3) {
+                 long avg = (tapIntervals[0] + tapIntervals[1] + tapIntervals[2]) / 3;
+                 if (avg > 0) {
+                   currentBPM = round(60000.0 / avg); 
+                   if (currentBPM < 40) currentBPM = 40;
+                   if (currentBPM > 240) currentBPM = 240;
+                   clockIntervalMicros = (60.0 / currentBPM / 24.0) * 1000000.0;
+                   lastValidInterval = avg; 
+                   
+                   if (tapsInSequence == 3) {
+                       clockTickCounter = 0;
+                       lastClockMicros = nowMicros;
+                   }
+                 }
+             }
            }
-        } else if (tapGap > 2000) {
-          // Si pasó mucho tiempo, la próxima pisada inicia una nueva secuencia
+        } else if (tapGap > 2500) {
           newSequence = true; 
+          tapsInSequence = 0; 
         }
         lastPressTime = nowMillis; 
       }
     }
-
-    // --- AL SOLTAR ---
-    // Nota: En pedales NC, soltar cierra el circuito a Tierra (LOW)
     if (reading == LOW && isPressed) {
        lastDebounceTime = nowMillis; 
        isPressed = false; 
     }
   }
 
-  // --------------------------------------------------------------
-  // 3. GESTIÓN DE MODOS (PRESIÓN LARGA)
-  // --------------------------------------------------------------
   if (isPressed && !longPressHandled) {
-    // Si se mantiene pisado más de 2 segundos
     if (nowMillis - pressStartTime > 2000) {
-      startMode = !startMode; // Cambiar modo
-      longPressHandled = true; // Evitar rebotes
-      
-      // Feedback Visual del Cambio
+      startMode = !startMode; 
+      longPressHandled = true;
       if (startMode) {
         pixels.setPixelColor(0, colorStart); digitalWrite(ledPin, HIGH);
       } else {
