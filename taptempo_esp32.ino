@@ -25,7 +25,7 @@ const int txPin1 = 17;     // Salida Principal
 const int txPin2 = 43;     // Salida Secundaria (Backup/Dual)
 // Entradas y Salidas Físicas
 const int pedalPin = 13;   // Pedal de Sustain (Configurado para NC)
-const int ledPin = 39;     // LED Rojo Externo
+const int ledPin = 20;     // LED Rojo Externo
 
 // --- CONFIGURACIÓN RGB (ESP32-S3 Built-in) ---
 const int rgbPin = 48; 
